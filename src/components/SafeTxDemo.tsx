@@ -125,45 +125,89 @@ export default function SafeTxDemo() {
   // =========================
 
   const handleSignMessage = async () => {
-    if (!walletClient) return;
-    if (!messageContent) {
-      alert('请输入消息内容');
-      return;
+    // 0. 基础检查
+    if (!walletClient || !messageContent) {
+        console.log("❌ 缺少 walletClient 或消息内容");
+        return;
     }
-    
+
     setIsLoading(true);
-    setStatus('正在初始化 Safe SDK (消息模式)...');
+    setStatus('正在准备...');
 
     try {
-      // 1. 获取 API Kit (用于上传)
-      const { apiKit } = await getSafeKits(chainId, walletClient);
+        // 1. 获取 Kit 实例
+        const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
+        const safeAddress = await protocolKit.getAddress();
+        const currentAddress = walletClient.account.address;
 
-      setStatus('请在钱包中签名 (Sign Message)...');
-      
-      // 🔥 使用 WalletClient 直接签名 (Personal Sign)
-      const signature = await walletClient.signMessage({
-        message: messageContent
-      });
+        // ---------------------------------------------------------
+        // 🛡️ 关键步骤：检查当前钱包是否是 Safe Owner
+        // ---------------------------------------------------------
+        console.log("🔍 正在检查 Owner 权限...");
+        const owners = await protocolKit.getOwners();
 
-      console.log('Raw Signature:', signature);
+        console.log('🔍 当前钱包地址:', owners);
+        
+        const isOwner = owners.some(owner => 
+            owner.toLowerCase() === currentAddress.toLowerCase()
+        );
 
-      setStatus('正在上传签名到 Safe 服务端...');
-      
-      // 2. 上传到 Safe API
-      await apiKit.addMessage(SAFE_ADDRESS, {
-        message: messageContent,
-        signature: signature,
-      });
+        if (!isOwner) {
+            // 如果不是 Owner，直接抛出错误，停止后续操作
+            throw new Error(`当前钱包 (${currentAddress.slice(0,6)}...) 不是该 Safe 的拥有者！请切换账号。`);
+        }
+        console.log("✅ 权限验证通过");
 
-      setStatus(`✅ 消息签名成功！\n已上传到 Safe 后台 (Transactions -> Messages)。`);
+        // ---------------------------------------------------------
+        // 2. 创建消息
+        // ---------------------------------------------------------
+        console.log('1️⃣ 创建消息对象...');
+        // SDK v6: 创建 SafeMessage 对象 (EIP-712 格式)
+        const safeMessage = protocolKit.createMessage(messageContent);
+
+        // ---------------------------------------------------------
+        // 3. 签名
+        // ---------------------------------------------------------
+        console.log('2️⃣ 请求签名...');
+        setStatus('请在钱包中签名 (EIP-712)...');
+        
+        // SDK v6: 唤起钱包签名
+        const signedMessage = await protocolKit.signMessage(safeMessage);
+
+        // ---------------------------------------------------------
+        // 4. 上传到 Safe 服务端
+        // ---------------------------------------------------------
+        console.log('3️⃣ 签名完成，准备上传...');
+        setStatus('正在上传到 Safe 后台...');
+
+        // 获取聚合签名数据
+        const signature = signedMessage.encodedSignatures();
+
+        console.log('signature', signature);
+
+
+
+        // 调用 API Kit 上传
+        await apiKit.addMessage(safeAddress, {
+            message: messageContent,
+            signature: signature
+        });
+
+        setStatus('✅ 成功！消息已签名并上传。');
+        
+        // 如果你有刷新列表的函数，可以在这里调用
+        // fetchMessages(); 
 
     } catch (err: any) {
-      console.error(err);
-      setStatus(`❌ 消息签名失败: ${err.message}`);
+        console.error("❌ 签名流程出错:", err);
+        // 提取错误信息，如果是对象则转字符串
+        const errMsg = err.message || "未知错误";
+        setStatus(`❌ 出错: ${errMsg}`);
     } finally {
-      setIsLoading(false);
+        setIsLoading(false);
     }
-  };
+};
+
 
   // =========================
   // 渲染 UI

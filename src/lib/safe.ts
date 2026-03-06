@@ -1,17 +1,35 @@
-import { ethers } from 'ethers'; // v5
-import Safe, { EthersAdapter } from '@safe-global/protocol-kit';
+import Safe from '@safe-global/protocol-kit';
 import SafeApiKit from '@safe-global/api-kit';
 import type { WalletClient } from 'viem';
 
 // ✅ 你的真实 Safe 地址
-export const SAFE_ADDRESS = '0xB3025aBA0b68CB840202C5B4ce875706fc7FFEe0'; 
+export const SAFE_ADDRESS = '0x860dA3e57971cf0B6378Ac5eE8839D2221f8D0BF'; 
 
+// 1. 辅助函数：获取 Safe 交易服务 API 地址
+// 必须显式提供这个 URL，否则 SDK 会报错要求 apiKey
 const getTxServiceUrl = (chainId: number) => {
     switch (chainId) {
-        case 1: return 'https://safe-transaction-mainnet.safe.global';
-        case 11155111: return 'https://safe-transaction-sepolia.safe.global';
-        case 56: return 'https://safe-transaction-bsc.safe.global';
-        default: return 'https://safe-transaction-mainnet.safe.global';
+        case 1: 
+            return 'https://safe-transaction-mainnet.safe.global';
+        case 11155111: 
+            return 'https://safe-transaction-sepolia.safe.global';
+        case 56: 
+            return 'https://safe-transaction-bsc.safe.global';
+        case 137:
+            return 'https://safe-transaction-polygon.safe.global';
+        default: 
+            // 默认回退到 Sepolia，或者抛出错误
+            return 'https://safe-transaction-sepolia.safe.global';
+    }
+};
+
+// 2. 辅助函数：获取 RPC URL (用于无钱包时的只读模式)
+const getRpcUrl = (chainId: number) => {
+    switch (chainId) {
+        case 1: return 'https://eth.llamarpc.com';
+        case 11155111: return 'https://rpc.sepolia.org';
+        case 56: return 'https://binance.llamarpc.com';
+        default: return 'https://rpc.sepolia.org';
     }
 };
 
@@ -19,52 +37,33 @@ export async function getSafeKits(
   chainId: number,
   walletClient?: WalletClient
 ) {
-  let provider;
-  let signer;
+  let protocolKit;
 
-  if (walletClient) {
-    if (typeof window !== 'undefined' && (window as any).ethereum) {
-      // 1. 初始化 Provider
-      provider = new ethers.providers.Web3Provider((window as any).ethereum);
-
-      // 2. 获取 Signer
-      // 🔥【关键修复 1】显式传入当前钱包地址，避免 unknown account #0
-      const currentAddress = walletClient.account?.address;
-      signer = provider.getSigner(currentAddress);
-
-      // 🔥【关键修复 2】直接覆盖方法来禁用 ENS，不要用 Proxy！
-      // 这种方式最安全，不会破坏 signer 的内部逻辑
-      signer.resolveName = async (name: string) => {
-        if (name.startsWith('0x')) return name;
-        return null; 
-      };
-      
-      provider.resolveName = async (name: string) => {
-        if (name.startsWith('0x')) return name;
-        return null;
-      };
-    }
+  // ------------------------------------------------------
+  // 3. 初始化 Protocol Kit (v6 写法)
+  // ------------------------------------------------------
+  if (walletClient && typeof window !== 'undefined' && (window as any).ethereum) {
+    // ✅ 有钱包：直接传入 window.ethereum
+    protocolKit = await Safe.init({
+      provider: (window as any).ethereum, 
+      signer: walletClient.account?.address, 
+      safeAddress: SAFE_ADDRESS,
+    });
   } else {
-    const RPC_URL = 'https://rpc.sepolia.org';
-    provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+    // ✅ 无钱包：只读模式
+    protocolKit = await Safe.init({
+      provider: getRpcUrl(chainId),
+      safeAddress: SAFE_ADDRESS,
+    });
   }
 
-  // 3. 初始化适配器
-  const ethAdapter = new EthersAdapter({
-    ethers,
-    signerOrProvider: signer || provider,
-  });
-
-  // 4. 初始化 Protocol Kit
-  const protocolKit = await Safe.create({
-    ethAdapter,
-    safeAddress: SAFE_ADDRESS,
-  });
-
-  // 5. 初始化 API Kit
+  // ------------------------------------------------------
+  // 4. 初始化 API Kit (v4 写法 - 关键修复)
+  // ------------------------------------------------------
   const apiKit = new SafeApiKit({
     chainId: BigInt(chainId),
-    txServiceUrl: getTxServiceUrl(chainId),
+    // 🔥 关键：显式传入 URL，绕过 apiKey 检查
+    txServiceUrl: getTxServiceUrl(chainId) 
   });
 
   return { protocolKit, apiKit };
