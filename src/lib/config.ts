@@ -24,10 +24,11 @@ createAppKit({
   metadata: {
     name: 'Safe Demo',
     description: 'Safe Demo App',
-    url: 'https://localhost:5173', 
+    url: 'http://localhost:5173', 
     icons: ['https://avatars.githubusercontent.com/u/37784886']
   },
-  features: {
-    analytics: true
-  }
+  featuredWalletIds: [
+    '225affb176778569276e484e1b92637ad061b01e13a048b35a9d280c3b58970f', // Safe (Safe{Wallet}) - 主推
+    '1ae92b26df02f0abca6304df07debccd18262fdf5fe82daa81593582dac9a369', // MetaMask
+  ],
 })
