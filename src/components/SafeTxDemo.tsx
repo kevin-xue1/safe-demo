@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { useAccount, useWalletClient, useChainId } from 'wagmi';
-import { parseEther } from 'viem';
+import  { hashSafeMessage } from '@safe-global/protocol-kit'
+
+import { hashTypedData, keccak256, toBytes, stringToBytes } from 'viem';
+
 import { getSafeKits, SAFE_ADDRESS } from '../lib/safe';
 
 export default function SafeTxDemo() {
@@ -15,9 +18,12 @@ export default function SafeTxDemo() {
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
   const [safeTxHash, setSafeTxHash] = useState('');
+  const [txDetails, setTxDetails] = useState<any>(null);
   
   // --- 消息签名相关状态 ---
   const [messageContent, setMessageContent] = useState('Safe Demo 固定消息');
+  const [messageHash, setMessageHash] = useState(''); // 存储消息的 Hash
+  const [messageDetails, setMessageDetails] = useState<any>(null); // 存储消息详情
   
   // --- 公共状态 ---
   const [status, setStatus] = useState('');
@@ -31,6 +37,7 @@ export default function SafeTxDemo() {
     if (!walletClient) return;
     setIsLoading(true);
     setStatus('正在初始化 Safe SDK (转账模式)...');
+    setTxDetails(null);
 
     try {
       const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
@@ -50,7 +57,6 @@ export default function SafeTxDemo() {
       setSafeTxHash(txHash);
 
       setStatus('请在钱包中签名 (Sign Transaction Hash)...');
-      // 这里 signHash 是好用的，继续保持
       const senderSignature = await protocolKit.signHash(txHash);
 
       setStatus('正在提交到 Safe API...');
@@ -64,9 +70,29 @@ export default function SafeTxDemo() {
       });
 
       setStatus(`✅ 转账提案已 Propose!\nSafeTxHash: ${txHash}\n请通知其他 Owner 进行 Confirm。`);
+      handleCheckStatus(txHash);
+
     } catch (err: any) {
       console.error(err);
       setStatus(`❌ Propose 失败: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCheckStatus = async (hashToCheck?: string) => {
+    const targetHash = hashToCheck || safeTxHash;
+    if (!targetHash || !walletClient) return;
+    
+    setIsLoading(true);
+    try {
+      const { apiKit } = await getSafeKits(chainId, walletClient);
+      const details = await apiKit.getTransaction(targetHash);
+      setTxDetails(details);
+      setStatus(`✅ 状态已更新 (Hash: ${targetHash.slice(0, 6)}...)`);
+    } catch (err: any) {
+      console.error(err);
+      setStatus(`❌ 查询失败: ${err.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -87,6 +113,7 @@ export default function SafeTxDemo() {
       await apiKit.confirmTransaction(safeTxHash, signature.data);
 
       setStatus('✅ Confirm 成功! 签名已上传。');
+      handleCheckStatus();
     } catch (err: any) {
       console.error(err);
       setStatus(`❌ Confirm 失败: ${err.message}`);
@@ -112,6 +139,7 @@ export default function SafeTxDemo() {
       const executeTxResponse = await protocolKit.executeTransaction(safeTransaction);
       
       setStatus(`🚀 交易已发送!\nTx Hash: ${executeTxResponse.hash}\n等待上链...`);
+      handleCheckStatus();
     } catch (err: any) {
       console.error(err);
       setStatus(`❌ Execute 失败: ${err.message}`);
@@ -124,90 +152,117 @@ export default function SafeTxDemo() {
   // 功能 2: 消息签名 (Message)
   // =========================
 
+  // 2.1 创建/发起消息签名 (EIP-712)
   const handleSignMessage = async () => {
-    // 0. 基础检查
-    if (!walletClient || !messageContent) {
-        console.log("❌ 缺少 walletClient 或消息内容");
-        return;
-    }
+    if (!walletClient || !messageContent) return;
 
     setIsLoading(true);
     setStatus('正在准备...');
 
     try {
-        // 1. 获取 Kit 实例
         const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
         const safeAddress = await protocolKit.getAddress();
-        const currentAddress = walletClient.account.address;
 
-        // ---------------------------------------------------------
-        // 🛡️ 关键步骤：检查当前钱包是否是 Safe Owner
-        // ---------------------------------------------------------
-        console.log("🔍 正在检查 Owner 权限...");
-        const owners = await protocolKit.getOwners();
+ 
 
-        console.log('🔍 当前钱包地址:', owners);
+        // ============================================================
+        // 🎯 修正后的 Hash 计算逻辑
+        // ============================================================
         
-        const isOwner = owners.some(owner => 
-            owner.toLowerCase() === currentAddress.toLowerCase()
-        );
+        // const domain = {
+        //     chainId: chainId,
+        //     verifyingContract: safeAddress as `0x${string}`, 
+        // };
 
-        if (!isOwner) {
-            // 如果不是 Owner，直接抛出错误，停止后续操作
-            throw new Error(`当前钱包 (${currentAddress.slice(0,6)}...) 不是该 Safe 的拥有者！请切换账号。`);
-        }
-        console.log("✅ 权限验证通过");
+        // const types = {
+        //     SafeMessage: [
+        //         { name: 'message', type: 'bytes' },
+        //     ],
+        // };
 
-        // ---------------------------------------------------------
-        // 2. 创建消息
-        // ---------------------------------------------------------
-        console.log('1️⃣ 创建消息对象...');
-        // SDK v6: 创建 SafeMessage 对象 (EIP-712 格式)
+        // ⚠️ 关键修正点：
+        // 之前我们传的是 keccak256(content)，导致被哈希了两次。
+        // 现在直接传原始字符串的 bytes。
+        // EIP-712 规范中，type 为 bytes 时，编码逻辑是 keccak256(value)。
+        // 所以 viem 会自动帮我们做 keccak256(messageContent)。
+        // const rawMessageBytes = stringToBytes(messageContent);
+
+        // const calculatedHash = hashTypedData({
+        //     domain,
+        //     types,
+        //     primaryType: 'SafeMessage',
+        //     message: {
+        //         message: rawMessageBytes, 
+        //     },
+        // });
+
+        // console.log('🌟 [本地计算] Safe Message Hash:', calculatedHash);
+
+
+       
+
+        const messageHash = hashSafeMessage(messageContent)
+        const safeMessageHash = await protocolKit.getSafeMessageHash(messageHash)
+
+        setMessageHash(safeMessageHash);
+
+        // ============================================================
+        // SDK 签名流程 (保持不变)
+        // ============================================================
+
         const safeMessage = protocolKit.createMessage(messageContent);
-
-        // ---------------------------------------------------------
-        // 3. 签名
-        // ---------------------------------------------------------
-        console.log('2️⃣ 请求签名...');
-        setStatus('请在钱包中签名 (EIP-712)...');
         
-        // SDK v6: 唤起钱包签名
+        setStatus('请在钱包中签名 (EIP-712)...');
         const signedMessage = await protocolKit.signMessage(safeMessage);
 
-        // ---------------------------------------------------------
-        // 4. 上传到 Safe 服务端
-        // ---------------------------------------------------------
-        console.log('3️⃣ 签名完成，准备上传...');
-        setStatus('正在上传到 Safe 后台...');
-
-        // 获取聚合签名数据
-        const signature = signedMessage.encodedSignatures();
-
-        console.log('signature', signature);
-
-
-
-        // 调用 API Kit 上传
-        await apiKit.addMessage(safeAddress, {
+        setStatus('正在上传签名到 Safe 后台...');
+        
+        const response = await apiKit.addMessage(safeAddress, {
             message: messageContent,
-            signature: signature
+            signature: signedMessage.encodedSignatures()
         });
 
-        setStatus('✅ 成功！消息已签名并上传。');
+        const isValid = await protocolKit.isValidSignature(messageHash, signedMessage.encodedSignatures())
+
+        console.log('isValid',isValid)
+
+        console.log('✅ [Safe Service Response]:', response);
+
+        setStatus(`✅ 成功！消息已签名并上传。\nMessage Hash: ${safeMessageHash}`);
         
-        // 如果你有刷新列表的函数，可以在这里调用
-        // fetchMessages(); 
+        handleCheckMessage(safeMessageHash);
 
     } catch (err: any) {
         console.error("❌ 签名流程出错:", err);
-        // 提取错误信息，如果是对象则转字符串
-        const errMsg = err.message || "未知错误";
-        setStatus(`❌ 出错: ${errMsg}`);
+        setStatus(`❌ 出错: ${err.message}`);
     } finally {
         setIsLoading(false);
     }
 };
 
+  // 2.2 查询消息状态
+  const handleCheckMessage = async (hashToCheck?: string) => {
+      const targetHash = hashToCheck || messageHash;
+      if (!targetHash || !walletClient) return;
+
+      setIsLoading(true);
+      try {
+          const { apiKit } = await getSafeKits(chainId, walletClient);
+          
+          // 获取消息详情
+          const message = await apiKit.getMessage(targetHash);
+          console.log("消息详情:", message);
+          
+          setMessageDetails(message);
+          setStatus(`✅ 消息状态已更新`);
+      } catch (err: any) {
+          console.error(err);
+          setStatus(`❌ 查询消息失败: ${err.message}\n(可能该 Hash 不存在)`);
+          setMessageDetails(null);
+      } finally {
+          setIsLoading(false);
+      }
+  };
 
   // =========================
   // 渲染 UI
@@ -235,7 +290,7 @@ export default function SafeTxDemo() {
       {/* 顶部切换 Tab */}
       <div style={{ display: 'flex', marginBottom: 20, borderBottom: '1px solid #eee' }}>
         <button
-          onClick={() => { setActiveTab('transfer'); setStatus(''); }}
+          onClick={() => { setActiveTab('transfer'); setStatus(''); setTxDetails(null); }}
           style={{
             flex: 1,
             padding: '10px',
@@ -290,30 +345,70 @@ export default function SafeTxDemo() {
             1. 发起提案 (Propose)
           </button>
 
-          {safeTxHash && (
-            <div style={{ marginTop: 16, padding: 12, background: '#f0f9ff', borderRadius: 8 }}>
-              <p style={{fontSize: 12, fontWeight: 'bold', margin: '0 0 8px 0'}}>当前交易 Hash:</p>
-              <div style={{fontSize: 10, wordBreak: 'break-all', color: '#0066cc', marginBottom: 12}}>
-                {safeTxHash}
-              </div>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button 
-                  onClick={handleConfirm}
-                  disabled={isLoading}
-                  style={{ flex: 1, padding: 8, background: '#2196F3', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
-                >
-                  2. 确认 (Confirm)
-                </button>
-                <button 
-                  onClick={handleExecute}
-                  disabled={isLoading}
-                  style={{ flex: 1, padding: 8, background: '#4CAF50', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
-                >
-                  3. 执行 (Execute)
-                </button>
-              </div>
+          {/* 交易操作区域 */}
+          <div style={{ marginTop: 16, padding: 12, background: '#f8f9fa', borderRadius: 8, border: '1px solid #e9ecef' }}>
+            <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12}}>
+               <input 
+                  type="text" 
+                  value={safeTxHash}
+                  onChange={(e) => setSafeTxHash(e.target.value)}
+                  placeholder="输入 SafeTxHash 查询..."
+                  style={{flex: 1, padding: 6, fontSize: 12, borderRadius: 4, border: '1px solid #ccc'}}
+               />
+               <button 
+                  onClick={() => handleCheckStatus()}
+                  disabled={!safeTxHash || isLoading}
+                  style={{padding: '6px 12px', background: '#6c757d', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12}}
+               >
+                  🔍 查询
+               </button>
             </div>
-          )}
+
+            {/* 交易详情卡片 */}
+            {txDetails && (
+              <div style={{ background: '#fff', padding: 12, borderRadius: 6, border: '1px solid #dee2e6', marginBottom: 12, fontSize: 12 }}>
+                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 4}}>
+                  <span style={{color: '#666'}}>状态:</span>
+                  <span style={{fontWeight: 'bold', color: txDetails.isExecuted ? 'green' : '#f59e0b'}}>
+                    {txDetails.isExecuted ? '✅ 已执行' : '⏳ 等待中'}
+                  </span>
+                </div>
+                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 4}}>
+                  <span style={{color: '#666'}}>签名:</span>
+                  <span style={{fontWeight: 'bold'}}>
+                    {txDetails.confirmations?.length || 0} / {txDetails.confirmationsRequired}
+                  </span>
+                </div>
+                
+                {/* 已签名者列表 */}
+                <div style={{marginTop: 8, paddingTop: 8, borderTop: '1px dashed #eee'}}>
+                  <div style={{color: '#666', marginBottom: 4}}>已签名 Owner:</div>
+                  {txDetails.confirmations?.map((c: any, idx: number) => (
+                    <div key={idx} style={{fontFamily: 'monospace', color: '#333', fontSize: 10}}>
+                      • {c.owner.slice(0, 6)}...{c.owner.slice(-4)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button 
+                onClick={handleConfirm}
+                disabled={isLoading || !safeTxHash}
+                style={{ flex: 1, padding: 8, background: '#2196F3', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+              >
+                2. 确认 (Confirm)
+              </button>
+              <button 
+                onClick={handleExecute}
+                disabled={isLoading || !safeTxHash}
+                style={{ flex: 1, padding: 8, background: '#4CAF50', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+              >
+                3. 执行 (Execute)
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -333,11 +428,57 @@ export default function SafeTxDemo() {
             disabled={isLoading || !messageContent}
             style={{ padding: 12, background: '#673AB7', color: '#fff', borderRadius: 6, border: 'none', cursor: 'pointer', marginTop: 8 }}
           >
-            ✍️ 签名并上传 (Sign Message)
+            1. 发起签名 (Create)
           </button>
+
+           {/* 消息操作区域 */}
+           <div style={{ marginTop: 16, padding: 12, background: '#f8f9fa', borderRadius: 8, border: '1px solid #e9ecef' }}>
+            <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12}}>
+               <input 
+                  type="text" 
+                  value={messageHash}
+                  onChange={(e) => setMessageHash(e.target.value)}
+                  placeholder="输入 Message Hash 查询..."
+                  style={{flex: 1, padding: 6, fontSize: 12, borderRadius: 4, border: '1px solid #ccc'}}
+               />
+               <button 
+                  onClick={() => handleCheckMessage()}
+                  disabled={!messageHash || isLoading}
+                  style={{padding: '6px 12px', background: '#6c757d', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12}}
+               >
+                  🔍 查询
+               </button>
+            </div>
+
+            {/* 消息详情卡片 */}
+            {messageDetails && (
+              <div style={{ background: '#fff', padding: 12, borderRadius: 6, border: '1px solid #dee2e6', marginBottom: 12, fontSize: 12 }}>
+                <div style={{marginBottom: 8, wordBreak: 'break-all'}}>
+                  <span style={{color: '#666'}}>内容: </span>
+                  <b>{typeof messageDetails.message === 'string' ? messageDetails.message : JSON.stringify(messageDetails.message)}</b>
+                </div>
+                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 4}}>
+                  <span style={{color: '#666'}}>签名进度:</span>
+                  <span style={{fontWeight: 'bold'}}>
+                    {messageDetails.confirmations?.length || 0} / {messageDetails.confirmationsRequired}
+                  </span>
+                </div>
+                
+                {/* 已签名者列表 */}
+                <div style={{marginTop: 8, paddingTop: 8, borderTop: '1px dashed #eee'}}>
+                  <div style={{color: '#666', marginBottom: 4}}>已签名 Owner:</div>
+                  {messageDetails.confirmations?.map((c: any, idx: number) => (
+                    <div key={idx} style={{fontFamily: 'monospace', color: '#333', fontSize: 10}}>
+                      • {c.owner.slice(0, 6)}...{c.owner.slice(-4)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           
           <p style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-            * 此操作不会消耗 Gas，仅生成 EIP-712 签名并上传到 Safe 服务端。
+            * 消息签名仅在链下聚合，不消耗 Gas，不执行上链。
           </p>
         </div>
       )}
