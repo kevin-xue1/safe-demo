@@ -270,7 +270,7 @@ export default function SafeTxDemo() {
               name: 'MyDEX', // 你的应用名
               version: '1',        // 你定义的版本号
               chainId: Number(chainId),   // Sepolia ID
-              verifyingContract: safeAddress, // 填用户的 Safe 地址
+              verifyingContract: '0x0000000000000000000000000000000000000000', // 填用户的 Safe 地址
           },
           primaryType: 'Login', // 类型叫 Login
           message: {
