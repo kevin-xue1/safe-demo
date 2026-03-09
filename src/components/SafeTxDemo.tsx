@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAccount, useWalletClient, useChainId } from 'wagmi';
 import { hashSafeMessage } from '@safe-global/protocol-kit';
+// import { SigningMethod } from '@safe-global/sdk-types-kit'
 import { parseEther } from 'viem'; // 补充引入 parseEther
 import { getSafeKits, SAFE_ADDRESS } from '../lib/safe';
 
@@ -241,6 +242,7 @@ export default function SafeTxDemo() {
   // =========================
 
   const handleSignMessage = async () => {
+
     if (!walletClient || !messageContent) return;
 
     setIsLoading(true);
@@ -250,20 +252,50 @@ export default function SafeTxDemo() {
         const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
         const safeAddress = await protocolKit.getAddress();
 
-        const messageHashRaw = hashSafeMessage(messageContent)
+        const messageContentData = {
+          types: {
+              EIP712Domain: [
+                  { name: 'name', type: 'string' },
+                  { name: 'version', type: 'string' },
+                  { name: 'chainId', type: 'uint256' },
+                  { name: 'verifyingContract', type: 'address' }, // 加上这个更安全，绑定当前 Safe
+              ],
+              // 定义登录消息结构
+              Login: [
+                  { name: 'message', type: 'string' },
+                  { name: 'nonce', type: 'string' }, // 防重放攻击的随机数
+              ]
+          },
+          domain: {
+              name: 'MyDEX', // 你的应用名
+              version: '1',        // 你定义的版本号
+              chainId: Number(chainId),   // Sepolia ID
+              verifyingContract: safeAddress, // 填用户的 Safe 地址
+          },
+          primaryType: 'Login', // 类型叫 Login
+          message: {
+              message: messageContent, // 给用户看的提示语
+              nonce: Math.random().toString(36).substring(2, 15), // 后端生成的随机数
+          }
+      };
+
+        const messageHashRaw = hashSafeMessage(messageContentData)
         const safeMessageHash = await protocolKit.getSafeMessageHash(messageHashRaw)
         setMessageHash(safeMessageHash);
 
         // SDK 签名流程
-        const safeMessage = protocolKit.createMessage(messageContent);
+        const safeMessage = protocolKit.createMessage(messageContentData);
         
         setStatus('请在钱包中签名 (EIP-712)...');
-        const signedMessage = await protocolKit.signMessage(safeMessage);
+        const signedMessage = await protocolKit.signMessage(
+          safeMessage, 
+          'eth_signTypedData_v4'
+      );
 
         setStatus('正在上传签名到 Safe 后台...');
         
         await apiKit.addMessage(safeAddress, {
-            message: messageContent,
+            message: messageContentData,
             signature: signedMessage.encodedSignatures()
         });
 
