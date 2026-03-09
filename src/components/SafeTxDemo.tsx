@@ -165,39 +165,6 @@ export default function SafeTxDemo() {
 
  
 
-        // ============================================================
-        // 🎯 修正后的 Hash 计算逻辑
-        // ============================================================
-        
-        // const domain = {
-        //     chainId: chainId,
-        //     verifyingContract: safeAddress as `0x${string}`, 
-        // };
-
-        // const types = {
-        //     SafeMessage: [
-        //         { name: 'message', type: 'bytes' },
-        //     ],
-        // };
-
-        // ⚠️ 关键修正点：
-        // 之前我们传的是 keccak256(content)，导致被哈希了两次。
-        // 现在直接传原始字符串的 bytes。
-        // EIP-712 规范中，type 为 bytes 时，编码逻辑是 keccak256(value)。
-        // 所以 viem 会自动帮我们做 keccak256(messageContent)。
-        // const rawMessageBytes = stringToBytes(messageContent);
-
-        // const calculatedHash = hashTypedData({
-        //     domain,
-        //     types,
-        //     primaryType: 'SafeMessage',
-        //     message: {
-        //         message: rawMessageBytes, 
-        //     },
-        // });
-
-        // console.log('🌟 [本地计算] Safe Message Hash:', calculatedHash);
-
 
        
 
@@ -224,11 +191,19 @@ export default function SafeTxDemo() {
 
         const isValid = await protocolKit.isValidSignature(messageHash, signedMessage.encodedSignatures())
 
+
+
+
         console.log('isValid',isValid)
 
-        console.log('✅ [Safe Service Response]:', response);
+        
+
+      
 
         setStatus(`✅ 成功！消息已签名并上传。\nMessage Hash: ${safeMessageHash}`);
+
+
+       
         
         handleCheckMessage(safeMessageHash);
 
@@ -247,13 +222,43 @@ export default function SafeTxDemo() {
 
       setIsLoading(true);
       try {
-          const { apiKit } = await getSafeKits(chainId, walletClient);
+          const { apiKit,protocolKit } = await getSafeKits(chainId, walletClient);
           
           // 获取消息详情
           const message = await apiKit.getMessage(targetHash);
           console.log("消息详情:", message);
           
           setMessageDetails(message);
+
+
+            // A. 获取 Safe 配置信息 (总人数、门槛)
+         const owners = await protocolKit.getOwners(); // string[] 所有拥有者地址
+         const threshold = await protocolKit.getThreshold(); // number 需要多少人签
+ 
+         // B. 从 API 获取该消息的详细信息 (包含已签名的列表)
+         // safeMessageHash 是消息的唯一标识
+        //  const messageDetails = await apiKit.getMessage(safeMessageHash);
+         
+         // C. 提取已签名数量
+         // confirmations 数组里是所有已经签过名的人
+         const currentSignatures = message.confirmations.length;
+         const signedOwners = message.confirmations.map(c => c.owner);
+ 
+         // 打印结果
+         console.log('-----------------------------------');
+         console.log(`📊 签名进度: ${currentSignatures} / ${threshold}`);
+         console.log(`👥 总拥有者: ${owners.length} 人`);
+         console.log(`📝 已签名名单:`, signedOwners);
+         console.log('-----------------------------------');
+ 
+         // 验证当前签名是否足够 (可选)
+         if (currentSignatures >= threshold) {
+             setStatus(`✅ 签名已完成！(${currentSignatures}/${threshold})\nHash: ${targetHash}`);
+         } else {
+             setStatus(`✅ 签名成功！等待其他人签名 (${currentSignatures}/${threshold})\nHash: ${targetHash}`);
+         }
+        
+
           setStatus(`✅ 消息状态已更新`);
       } catch (err: any) {
           console.error(err);
