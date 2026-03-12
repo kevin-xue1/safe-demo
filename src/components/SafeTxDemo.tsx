@@ -5,6 +5,7 @@ import { hashSafeMessage } from '@safe-global/protocol-kit';
 import { parseEther } from 'viem'; // 补充引入 parseEther
 import { getSafeKits, SAFE_ADDRESS } from '../lib/safe';
 import { OperationType } from '@safe-global/safe-core-sdk-types';
+import { hashTypedData, type TypedDataDomain } from 'viem';
 
 // --- 辅助组件：签名进度展示 ---
 const SignatureStatus = ({ 
@@ -127,95 +128,59 @@ export default function SafeTxDemo() {
     // 1. 基础检查
     if (!walletClient || !address) {
         console.error("Wallet not connected");
+        setStatus('❌ 钱包未连接');
+        return;
+    }
+
+    // 2. 安全检查：确保当前连接的确实是 Safe 地址
+    // (防止用户意外用普通钱包连接，导致直接把钱转出去了)
+    if (address.toLowerCase() !== SAFE_ADDRESS.toLowerCase()) {
+        setStatus(`❌ 模式错误：请使用 Safe 钱包 (WalletConnect) 连接。\n当前连接: ${address}\n目标 Safe: ${SAFE_ADDRESS}`);
         return;
     }
 
     setIsLoading(true);
-    setStatus('正在初始化 Safe SDK (转账模式)...');
+    setStatus('🚀 正在通过 Safe 钱包发起交易请求...');
     setTxDetails(null);
 
     try {
-        // 假设 getSafeKits 已经封装好了 protocolKit 和 apiKit 的初始化
-        const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
-
-        setStatus('正在获取最新 Nonce...');
+        console.log("Mode: Safe Wallet Direct Transaction");
 
         // ============================================================
-        // 🔥 关键优化：手动计算 Nonce 以避免冲突
+        // 🔥 核心逻辑：直接发送交易
         // ============================================================
-        // 1. 获取链上已执行的 Nonce (Safe 合约当前的 nonce)
-        const onChainNonce = await protocolKit.getNonce();
-        
-        // 2. 获取 API 服务中待处理的交易 (Pending Txs)
-        const pendingTxs = await apiKit.getPendingTransactions(SAFE_ADDRESS);
-        
-        // 3. 计算下一个可用 Nonce
-        let nextNonce = onChainNonce;
-        
-        if (pendingTxs.results.length > 0) {
-            // 找到 Pending 队列中最大的 nonce
-            const maxPendingNonce = Math.max(...pendingTxs.results.map(tx => tx.nonce));
-            // 如果 Pending 队列中有比链上更新的交易，则使用 max + 1
-            if (maxPendingNonce >= onChainNonce) {
-                nextNonce = maxPendingNonce + 1;
-            }
-        }
-
-        console.log(`当前链上 Nonce: ${onChainNonce}, 下一个可用 Nonce: ${nextNonce}`);
-        
-        setStatus('正在构建交易...');
-        
-        // 4. 定义交易内容
-        const safeTransactionData = {
-            to: to, 
-            value: parseEther(amount || '0').toString(), // 确保是 Wei
-            data: '0x',
-            operation: OperationType.Call, // 显式指定 Operation (0)
-        };
-
-        // 5. 创建 Safe 交易对象 (传入手动计算的 nonce)
-        const safeTransaction = await protocolKit.createTransaction({
-            transactions: [safeTransactionData],
-            options: {
-                nonce: nextNonce // <--- 强制指定 Nonce，防止覆盖
-            }
+        // 当你通过 WalletConnect 连接 Safe 时，发送 eth_sendTransaction
+        // 会被 Safe 的 Relay 服务拦截，并自动在 Safe 后台生成一个提案。
+        const hash = await walletClient.sendTransaction({
+            account: address, // 发起方是 Safe 自己
+            to: to,           // 接收方
+            value: parseEther(amount || '0'), // 金额
+            data: '0x',       // 普通转账数据为空
+            chain: null       //通常不需要指定 chain，WalletConnect 会自动处理
         });
 
-        // 6. 获取交易哈希
-        const safeTxHash = await protocolKit.getTransactionHash(safeTransaction);
-        setSafeTxHash(safeTxHash);
+        console.log("Transaction Request ID:", hash);
 
-        setStatus(`请在钱包中签名 (Nonce: ${nextNonce})...`);
-
-        // 7. 签名 (EIP-712)
-        const signedSafeTransaction = await protocolKit.signTransaction(safeTransaction);
-
-        // 8. 提取签名
-        // 注意：这里需要从 signedSafeTransaction 中提取，而不是 safeTransaction
-        const signature = signedSafeTransaction.encodedSignatures();
-
-        setStatus('正在提交到 Safe API...');
-
-        // 9. 提交提案
-        await apiKit.proposeTransaction({
-            safeAddress: SAFE_ADDRESS,
-            safeTransactionData: safeTransaction.data, // 包含 nonce, gas 等
-            safeTxHash: safeTxHash,
-            senderAddress: address,
-            senderSignature: signature,
-            origin: 'Safe Demo App',
-        });
-
-        setStatus(`✅ 转账提案已 Propose! (Nonce: ${nextNonce})\nSafeTxHash: ${safeTxHash}`);
+        // ============================================================
+        // ✅ 成功反馈
+        // ============================================================
+        setStatus(`✅ 交易请求已发送！\n\n请立即打开 Safe 手机 App (或网页版)\n在 "Transactions" 列表中确认并执行。\n\n请求 ID: ${hash}`);
         
+        setSafeTxHash(hash);
         if (handleCheckStatus) {
-            handleCheckStatus(safeTxHash);
+            handleCheckStatus(hash);
         }
 
     } catch (err: any) {
-        console.error("Propose Error:", err);
-        const errorMessage = err?.message || 'Unknown error';
-        setStatus(`❌ Propose 失败: ${errorMessage}`);
+        console.error("Transaction Error:", err);
+        
+        // 错误处理优化
+        let errorMessage = err?.message || 'Unknown error';
+        if (errorMessage.includes('User rejected')) {
+            errorMessage = '用户在钱包端取消了操作';
+        }
+        
+        setStatus(`❌ 发送失败: ${errorMessage}`);
     } finally {
         setIsLoading(false);
     }
@@ -239,130 +204,168 @@ export default function SafeTxDemo() {
     }
   };
 
-  const handleConfirm = async () => {
-    if (!safeTxHash || !walletClient) return;
-    setIsLoading(true);
-    setStatus('正在准备签名...');
+  // const handleConfirm = async () => {
+  //   if (!safeTxHash || !walletClient) return;
+  //   setIsLoading(true);
+  //   setStatus('正在准备签名...');
 
-    try {
-      const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
+  //   try {
+  //     const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
 
-      setStatus('请在钱包中签名确认...');
-      const signature = await protocolKit.signHash(safeTxHash);
+  //     setStatus('请在钱包中签名确认...');
+  //     const signature = await protocolKit.signHash(safeTxHash);
 
-      setStatus('正在上传签名...');
-      await apiKit.confirmTransaction(safeTxHash, signature.data);
+  //     setStatus('正在上传签名...');
+  //     await apiKit.confirmTransaction(safeTxHash, signature.data);
 
-      setStatus('✅ Confirm 成功! 签名已上传。');
-      handleCheckStatus();
-    } catch (err: any) {
-      console.error(err);
-      setStatus(`❌ Confirm 失败: ${err.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  //     setStatus('✅ Confirm 成功! 签名已上传。');
+  //     handleCheckStatus();
+  //   } catch (err: any) {
+  //     console.error(err);
+  //     setStatus(`❌ Confirm 失败: ${err.message}`);
+  //   } finally {
+  //     setIsLoading(false);
+  //   }
+  // };
 
-  const handleExecute = async () => {
-    if (!safeTxHash || !walletClient) return;
-    setIsLoading(true);
-    setStatus('正在准备执行...');
+  // const handleExecute = async () => {
+  //   if (!safeTxHash || !walletClient) return;
+  //   setIsLoading(true);
+  //   setStatus('正在准备执行...');
 
-    try {
-      const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
-      const safeTransaction = await apiKit.getTransaction(safeTxHash);
+  //   try {
+  //     const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
+  //     const safeTransaction = await apiKit.getTransaction(safeTxHash);
 
-      if ((safeTransaction.confirmations?.length || 0) < safeTransaction.confirmationsRequired) {
-        throw new Error(`签名不足: 当前 ${safeTransaction.confirmations?.length}, 需要 ${safeTransaction.confirmationsRequired}`);
-      }
+  //     if ((safeTransaction.confirmations?.length || 0) < safeTransaction.confirmationsRequired) {
+  //       throw new Error(`签名不足: 当前 ${safeTransaction.confirmations?.length}, 需要 ${safeTransaction.confirmationsRequired}`);
+  //     }
 
-      setStatus('正在提交上链 (需要 Gas)...');
-      const executeTxResponse = await protocolKit.executeTransaction(safeTransaction);
+  //     setStatus('正在提交上链 (需要 Gas)...');
+  //     const executeTxResponse = await protocolKit.executeTransaction(safeTransaction);
       
-      setStatus(`🚀 交易已发送!\nTx Hash: ${executeTxResponse.hash}\n等待上链...`);
-      handleCheckStatus();
-    } catch (err: any) {
-      console.error(err);
-      setStatus(`❌ Execute 失败: ${err.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  //     setStatus(`🚀 交易已发送!\nTx Hash: ${executeTxResponse.hash}\n等待上链...`);
+  //     handleCheckStatus();
+  //   } catch (err: any) {
+  //     console.error(err);
+  //     setStatus(`❌ Execute 失败: ${err.message}`);
+  //   } finally {
+  //     setIsLoading(false);
+  //   }
+  // };
 
   // =========================
   // 功能 2: 消息签名 (Message)
   // =========================
 
   const handleSignMessage = async () => {
-
-    if (!walletClient || !messageContent) return;
+    if (!walletClient || !address) return;
 
     setIsLoading(true);
     setStatus('正在准备...');
 
     try {
-        const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
+        const { apiKit, protocolKit } = await getSafeKits(chainId, walletClient);
         const safeAddress = await protocolKit.getAddress();
+        const chainIdNum = Number(chainId);
 
-        const messageContentData = {
-          types: {
-              EIP712Domain: [
-                  { name: 'name', type: 'string' },
-                  { name: 'version', type: 'string' },
-                  { name: 'chainId', type: 'uint256' },
-                  { name: 'verifyingContract', type: 'address' }, // 加上这个更安全，绑定当前 Safe
-              ],
-              // 定义登录消息结构
-              Login: [
-                  { name: 'message', type: 'string' },
-                  { name: 'nonce', type: 'string' }, // 防重放攻击的随机数
-              ]
-          },
-          domain: {
-              name: 'MyDEX', // 你的应用名
-              version: '1',        // 你定义的版本号
-              chainId: Number(chainId),   // Sepolia ID
-              verifyingContract: '0x0000000000000000000000000000000000000000', // 填用户的 Safe 地址
-          },
-          primaryType: 'Login', // 类型叫 Login
-          message: {
-              message: messageContent, // 给用户看的提示语
-              nonce: Math.random().toString(36).substring(2, 15), // 后端生成的随机数
-          }
-      };
+        // ==========================================
+        // 1. 定义业务数据 (内层)
+        // ==========================================
+        const domain: TypedDataDomain = {
+            name: 'Safe Login', 
+            version: '1',
+            chainId: chainIdNum,
+            verifyingContract: safeAddress as `0x${string}`,
+        };
 
-        const messageHashRaw = hashSafeMessage(messageContentData)
-        const safeMessageHash = await protocolKit.getSafeMessageHash(messageHashRaw)
-        setMessageHash(safeMessageHash);
+        const types = {
+            LoginRequest: [
+                { name: 'content', type: 'string' },
+                { name: 'timestamp', type: 'uint256' }
+            ]
+        };
 
-        // SDK 签名流程
-        const safeMessage = protocolKit.createMessage(messageContentData);
+        const message = {
+            content: messageContent,
+            timestamp: BigInt(Date.now())
+        };
+
+        // ==========================================
+        // 2. 计算内层 Hash (用于签名和上传)
+        // ==========================================
+        const innerHash = hashTypedData({
+            domain,
+            types,
+            primaryType: 'LoginRequest',
+            message
+        });
+        console.log("🔹 内层 Hash (业务数据):", innerHash);
+
+        // ==========================================
+        // 3. 计算外层 Hash (Safe ID) - 关键步骤！
+        // ==========================================
+        // 手动模拟 SafeMessage 包装过程，确保 ID 绝对正确
+        const safeMessageHash = hashTypedData({
+            domain: { 
+                chainId: chainIdNum, 
+                verifyingContract: safeAddress as `0x${string}` 
+            },
+            types: { 
+                SafeMessage: [{ name: 'message', type: 'bytes' }] 
+            },
+            primaryType: 'SafeMessage',
+            message: { message: innerHash } // 把内层 Hash 放进去
+        });
         
-        setStatus('请在钱包中签名 (EIP-712)...');
-        const signedMessage = await protocolKit.signMessage(
-          safeMessage, 
-          'eth_signTypedData_v4'
-      );
-
-        setStatus('正在上传签名到 Safe 后台...');
+        console.log("🔶 外层 Hash (Safe ID):", safeMessageHash);
         
-        await apiKit.addMessage(safeAddress, {
-            message: messageContentData,
-            signature: signedMessage.encodedSignatures()
+        // 🔥 核心动作：更新状态变量，供外部使用
+        setMessageHash(safeMessageHash); 
+
+        // ==========================================
+        // 4. 签名 (签内层)
+        // ==========================================
+        console.log("✍️ 请求签名...");
+        setStatus('请在钱包中签名...');
+        
+        const signature = await walletClient.signTypedData({
+            account: address as `0x${string}`,
+            domain,
+            types,
+            primaryType: 'LoginRequest',
+            message
         });
 
-        setStatus(`✅ 成功！消息已签名并上传。`);
-        handleCheckMessage(safeMessageHash);
+        console.log("signature", signature)
+
+        // ==========================================
+        // 5. 上传 (传内层 Hash)
+        // ==========================================
+        console.log("☁️ 上传签名...");
+        await apiKit.addMessage(safeAddress, {
+            message: innerHash, 
+            signature: signature
+        });
+
+        console.log("✅ 上传成功！");
+        setStatus('签名已上传，Hash 已更新');
+
+        // 可选：上传后立即查一次，确认状态
+        // const result = await apiKit.getMessage(safeMessageHash);
+        // console.log("🎉 当前状态:", result);
 
     } catch (err: any) {
-        console.error("❌ 签名流程出错:", err);
-        setStatus(`❌ 出错: ${err.message}`);
+        console.error("❌ 错误:", err);
+        setStatus(`失败: ${err.message}`);
     } finally {
         setIsLoading(false);
     }
-  };
+}
+
 
   const handleCheckMessage = async (hashToCheck?: string) => {
+    console.log("messageHash", messageHash)
       const targetHash = hashToCheck || messageHash;
       if (!targetHash || !walletClient) return;
 
@@ -479,7 +482,7 @@ export default function SafeTxDemo() {
             disabled={isLoading || !to || !amount}
             style={{ padding: 12, background: '#0f172a', color: '#fff', borderRadius: 8, border: 'none', cursor: 'pointer', fontWeight: 500 }}
           >
-            发起提案 (Propose)
+            发起转账
           </button>
 
           <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 16 }}>
@@ -493,7 +496,7 @@ export default function SafeTxDemo() {
                />
                <button 
                   onClick={() => handleCheckStatus()}
-                  disabled={!safeTxHash || isLoading}
+                  disabled={!safeTxHash}
                   style={{padding: '0 16px', background: '#f1f5f9', color: '#334155', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontWeight: 500}}
                >
                   查询
@@ -510,7 +513,7 @@ export default function SafeTxDemo() {
               />
             )}
 
-            <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+            {/* <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button 
                 onClick={handleConfirm}
                 disabled={isLoading || !safeTxHash}
@@ -525,7 +528,7 @@ export default function SafeTxDemo() {
               >
                 执行 (Execute)
               </button>
-            </div>
+            </div> */}
           </div>
         </div>
       )}
@@ -545,7 +548,7 @@ export default function SafeTxDemo() {
           
           <button 
             onClick={handleSignMessage} 
-            disabled={isLoading || !messageContent}
+            disabled={!messageContent}
             style={{ padding: 12, background: '#7c3aed', color: '#fff', borderRadius: 8, border: 'none', cursor: 'pointer', fontWeight: 500 }}
           >
             发起签名 (Sign)
@@ -562,7 +565,7 @@ export default function SafeTxDemo() {
                />
                <button 
                   onClick={() => handleCheckMessage()}
-                  disabled={!messageHash || isLoading}
+                  disabled={!messageHash}
                   style={{padding: '0 16px', background: '#f1f5f9', color: '#334155', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontWeight: 500}}
                >
                   查询
