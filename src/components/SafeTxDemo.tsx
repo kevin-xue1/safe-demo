@@ -4,6 +4,7 @@ import { hashSafeMessage } from '@safe-global/protocol-kit';
 // import { SigningMethod } from '@safe-global/sdk-types-kit'
 import { parseEther } from 'viem'; // 补充引入 parseEther
 import { getSafeKits, SAFE_ADDRESS } from '../lib/safe';
+import { OperationType } from '@safe-global/safe-core-sdk-types';
 
 // --- 辅助组件：签名进度展示 ---
 const SignatureStatus = ({ 
@@ -123,51 +124,102 @@ export default function SafeTxDemo() {
   // =========================
   
   const handlePropose = async () => {
-    if (!walletClient) return;
+    // 1. 基础检查
+    if (!walletClient || !address) {
+        console.error("Wallet not connected");
+        return;
+    }
+
     setIsLoading(true);
     setStatus('正在初始化 Safe SDK (转账模式)...');
     setTxDetails(null);
 
     try {
-      const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
+        // 假设 getSafeKits 已经封装好了 protocolKit 和 apiKit 的初始化
+        const { protocolKit, apiKit } = await getSafeKits(chainId, walletClient);
 
-      setStatus('正在构建交易...');
-      const safeTransactionData = {
-        to: to,
-        value: parseEther(amount || '0').toString(),
-        data: '0x',
-      };
+        setStatus('正在获取最新 Nonce...');
 
-      const safeTransaction = await protocolKit.createTransaction({
-        transactions: [safeTransactionData],
-      });
+        // ============================================================
+        // 🔥 关键优化：手动计算 Nonce 以避免冲突
+        // ============================================================
+        // 1. 获取链上已执行的 Nonce (Safe 合约当前的 nonce)
+        const onChainNonce = await protocolKit.getNonce();
+        
+        // 2. 获取 API 服务中待处理的交易 (Pending Txs)
+        const pendingTxs = await apiKit.getPendingTransactions(SAFE_ADDRESS);
+        
+        // 3. 计算下一个可用 Nonce
+        let nextNonce = onChainNonce;
+        
+        if (pendingTxs.results.length > 0) {
+            // 找到 Pending 队列中最大的 nonce
+            const maxPendingNonce = Math.max(...pendingTxs.results.map(tx => tx.nonce));
+            // 如果 Pending 队列中有比链上更新的交易，则使用 max + 1
+            if (maxPendingNonce >= onChainNonce) {
+                nextNonce = maxPendingNonce + 1;
+            }
+        }
 
-      const txHash = await protocolKit.getTransactionHash(safeTransaction);
-      setSafeTxHash(txHash);
+        console.log(`当前链上 Nonce: ${onChainNonce}, 下一个可用 Nonce: ${nextNonce}`);
+        
+        setStatus('正在构建交易...');
+        
+        // 4. 定义交易内容
+        const safeTransactionData = {
+            to: to, 
+            value: parseEther(amount || '0').toString(), // 确保是 Wei
+            data: '0x',
+            operation: OperationType.Call, // 显式指定 Operation (0)
+        };
 
-      setStatus('请在钱包中签名 (Sign Transaction Hash)...');
-      const senderSignature = await protocolKit.signHash(txHash);
+        // 5. 创建 Safe 交易对象 (传入手动计算的 nonce)
+        const safeTransaction = await protocolKit.createTransaction({
+            transactions: [safeTransactionData],
+            options: {
+                nonce: nextNonce // <--- 强制指定 Nonce，防止覆盖
+            }
+        });
 
-      setStatus('正在提交到 Safe API...');
-      await apiKit.proposeTransaction({
-        safeAddress: SAFE_ADDRESS,
-        safeTransactionData: safeTransaction.data,
-        safeTxHash: txHash,
-        senderAddress: address!,
-        senderSignature: senderSignature.data,
-        origin: 'Safe Demo App',
-      });
+        // 6. 获取交易哈希
+        const safeTxHash = await protocolKit.getTransactionHash(safeTransaction);
+        setSafeTxHash(safeTxHash);
 
-      setStatus(`✅ 转账提案已 Propose!\nSafeTxHash: ${txHash}`);
-      handleCheckStatus(txHash);
+        setStatus(`请在钱包中签名 (Nonce: ${nextNonce})...`);
+
+        // 7. 签名 (EIP-712)
+        const signedSafeTransaction = await protocolKit.signTransaction(safeTransaction);
+
+        // 8. 提取签名
+        // 注意：这里需要从 signedSafeTransaction 中提取，而不是 safeTransaction
+        const signature = signedSafeTransaction.encodedSignatures();
+
+        setStatus('正在提交到 Safe API...');
+
+        // 9. 提交提案
+        await apiKit.proposeTransaction({
+            safeAddress: SAFE_ADDRESS,
+            safeTransactionData: safeTransaction.data, // 包含 nonce, gas 等
+            safeTxHash: safeTxHash,
+            senderAddress: address,
+            senderSignature: signature,
+            origin: 'Safe Demo App',
+        });
+
+        setStatus(`✅ 转账提案已 Propose! (Nonce: ${nextNonce})\nSafeTxHash: ${safeTxHash}`);
+        
+        if (handleCheckStatus) {
+            handleCheckStatus(safeTxHash);
+        }
 
     } catch (err: any) {
-      console.error(err);
-      setStatus(`❌ Propose 失败: ${err.message}`);
+        console.error("Propose Error:", err);
+        const errorMessage = err?.message || 'Unknown error';
+        setStatus(`❌ Propose 失败: ${errorMessage}`);
     } finally {
-      setIsLoading(false);
+        setIsLoading(false);
     }
-  };
+};
 
   const handleCheckStatus = async (hashToCheck?: string) => {
     const targetHash = hashToCheck || safeTxHash;
